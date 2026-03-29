@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 import os
+import json
 from datetime import datetime
 import time
 
@@ -11,43 +13,90 @@ import time
 LOCAL_DATA_DIR = 'local_data'
 
 # ============================================
-# LOAD LOCAL DATA FUNCTIONS
+# HELPER FUNCTIONS
 # ============================================
-@st.cache_data(ttl=60)
-def load_local_observations():
-    """Load observations from local CSV"""
+def parse_json_cell(cell_value):
+    """Parse JSON from a single cell value"""
+    if not cell_value or pd.isna(cell_value):
+        return []
+    
+    # If it's already a list/dict
+    if isinstance(cell_value, (list, dict)):
+        return cell_value if isinstance(cell_value, list) else [cell_value]
+    
+    # If it's a string, try to parse as JSON
+    if isinstance(cell_value, str):
+        try:
+            parsed = json.loads(cell_value)
+            return parsed if isinstance(parsed, list) else [parsed]
+        except json.JSONDecodeError:
+            return []
+    
+    return []
+
+def load_csv_with_json_arrays(csv_path):
+    """
+    Load CSV where each row's first column contains a JSON array.
+    Returns a DataFrame with all parsed observations and run information.
+    """
+    if not os.path.exists(csv_path):
+        return pd.DataFrame(), []
+    
+    # Read CSV without parsing JSON
+    df_raw = pd.read_csv(csv_path)
+    
+    if df_raw.empty:
+        return pd.DataFrame(), []
+    
+    # Assume the JSON data is in the first column
+    first_col = df_raw.columns[0]
+    
+    all_parsed_data = []
+    run_ids = []
+    
+    for idx, row in df_raw.iterrows():
+        cell_value = row[first_col]
+        parsed = parse_json_cell(cell_value)
+        
+        if parsed:
+            run_id = idx + 2  # Row number (row 1 = header, row 2 = first run)
+            for item in parsed:
+                if isinstance(item, dict):
+                    item['run_id'] = run_id
+                    item['run_number'] = idx + 1
+                    # Convert timestamp if exists
+                    if 'timestamp' in item:
+                        try:
+                            item['timestamp'] = pd.to_datetime(item['timestamp'])
+                        except:
+                            pass
+            all_parsed_data.extend(parsed)
+            run_ids.append(run_id)
+    
+    return pd.DataFrame(all_parsed_data), run_ids
+
+def load_observations():
+    """Load observations from local CSV (JSON array format)"""
     csv_path = os.path.join(LOCAL_DATA_DIR, 'Observations.csv')
-    if os.path.exists(csv_path):
-        df = pd.read_csv(csv_path)
-        # Parse timestamp if needed
-        if 'timestamp' in df.columns:
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-        return df
-    return pd.DataFrame()
+    return load_csv_with_json_arrays(csv_path)
 
-@st.cache_data(ttl=60)
-def load_local_summary():
-    """Load summary from local CSV"""
+def load_summary():
+    """Load summary from local CSV (JSON array format)"""
     csv_path = os.path.join(LOCAL_DATA_DIR, 'Summary.csv')
-    if os.path.exists(csv_path):
-        return pd.read_csv(csv_path)
-    return pd.DataFrame()
+    df, runs = load_csv_with_json_arrays(csv_path)
+    return df, runs
 
-@st.cache_data(ttl=60)
-def load_local_anomalies():
-    """Load anomalies from local CSV"""
+def load_anomalies():
+    """Load anomalies from local CSV (JSON array format)"""
     csv_path = os.path.join(LOCAL_DATA_DIR, 'Anomalies.csv')
-    if os.path.exists(csv_path):
-        return pd.read_csv(csv_path)
-    return pd.DataFrame()
+    df, runs = load_csv_with_json_arrays(csv_path)
+    return df, runs
 
-@st.cache_data(ttl=60)
-def load_local_insights():
-    """Load insights from local CSV"""
+def load_insights():
+    """Load insights from local CSV (JSON array format)"""
     csv_path = os.path.join(LOCAL_DATA_DIR, 'Insights.csv')
-    if os.path.exists(csv_path):
-        return pd.read_csv(csv_path)
-    return pd.DataFrame()
+    df, runs = load_csv_with_json_arrays(csv_path)
+    return df, runs
 
 def get_last_sync_time():
     """Get last sync time from file modification"""
@@ -57,7 +106,28 @@ def get_last_sync_time():
         return datetime.fromtimestamp(mod_time)
     return None
 
-# Page config
+def get_run_summary(observations_df):
+    """Get summary of available runs"""
+    if observations_df.empty or 'run_number' not in observations_df.columns:
+        return []
+    
+    runs = observations_df.groupby('run_number').agg({
+        'timestamp': ['min', 'max', 'count'],
+        'consumption_kW': ['mean', 'max']
+    }).reset_index()
+    
+    runs.columns = ['run_number', 'start_time', 'end_time', 'num_obs', 'avg_kW', 'peak_kW']
+    
+    # Format time columns
+    if 'start_time' in runs.columns:
+        runs['start_time'] = pd.to_datetime(runs['start_time']).dt.strftime('%H:%M')
+        runs['end_time'] = pd.to_datetime(runs['end_time']).dt.strftime('%H:%M')
+    
+    return runs.to_dict('records')
+
+# ============================================
+# PAGE CONFIGURATION
+# ============================================
 st.set_page_config(
     page_title="Energy Dashboard (Local)",
     page_icon="⚡",
@@ -69,7 +139,7 @@ st.set_page_config(
 # ============================================
 def main():
     st.title("⚡ Energy Optimization Dashboard")
-    st.markdown("**Local Mode** - Reading from cached CSV files")
+    st.markdown("**Local Mode** - Reading from CSV files with JSON arrays in Column A")
     
     # Show last sync time
     last_sync = get_last_sync_time()
@@ -112,47 +182,88 @@ def main():
     
     # Load data
     with st.spinner("Loading local data..."):
-        observations_df = load_local_observations()
-        summary_df = load_local_summary()
-        anomalies_df = load_local_anomalies()
-        insights_df = load_local_insights()
+        observations_df, obs_runs = load_observations()
+        summary_df, sum_runs = load_summary()
+        anomalies_df, anom_runs = load_anomalies()
+        insights_df, ins_runs = load_insights()
     
     # Check if we have data
     if observations_df.empty:
         st.warning("⚠️ No local data found. Run sync script first:")
         st.code("python sync_google_sheets_local.py", language="bash")
         st.info("""
-        **Setup Instructions:**
-        1. Make sure your service account JSON file is in the same folder
-        2. Run `python sync_google_sheets_local.py` to download data
-        3. Run `python auto_sync.py` for automatic updates
-        4. Refresh this dashboard
+        **Expected CSV Format:**
+        - Each CSV has one column with JSON arrays
+        - Row 1: Header
+        - Row 2, 3, 4...: Each cell contains a JSON array of observations
         """)
         return
+    
+    # Get available runs
+    available_runs = sorted(observations_df['run_number'].unique()) if 'run_number' in observations_df else []
+    
+    # Run selector in sidebar
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("### Select Run")
+        
+        if available_runs:
+            selected_run = st.selectbox(
+                "Analysis Run",
+                options=available_runs,
+                index=len(available_runs) - 1,
+                format_func=lambda x: f"Run {x}"
+            )
+        else:
+            selected_run = None
+    
+    # Filter by selected run
+    if selected_run and 'run_number' in observations_df.columns:
+        current_observations = observations_df[observations_df['run_number'] == selected_run]
+        current_anomalies = anomalies_df[anomalies_df['run_number'] == selected_run] if 'run_number' in anomalies_df else pd.DataFrame()
+        current_insights = insights_df[insights_df['run_number'] == selected_run] if 'run_number' in insights_df else pd.DataFrame()
+        current_summary = summary_df[summary_df['run_number'] == selected_run] if 'run_number' in summary_df else pd.DataFrame()
+    else:
+        # Use latest run
+        if 'run_number' in observations_df.columns:
+            latest_run = observations_df['run_number'].max()
+            current_observations = observations_df[observations_df['run_number'] == latest_run]
+            current_anomalies = anomalies_df[anomalies_df['run_number'] == latest_run] if 'run_number' in anomalies_df else pd.DataFrame()
+            current_insights = insights_df[insights_df['run_number'] == latest_run] if 'run_number' in insights_df else pd.DataFrame()
+            current_summary = summary_df[summary_df['run_number'] == latest_run] if 'run_number' in summary_df else pd.DataFrame()
+        else:
+            current_observations = observations_df
+            current_anomalies = anomalies_df
+            current_insights = insights_df
+            current_summary = summary_df
+    
+    # Display run info
+    if available_runs:
+        st.info(f"📊 Showing **Run {selected_run if selected_run else latest_run}** | Total runs available: {len(available_runs)}")
     
     # Display metrics
     st.subheader("📊 Key Metrics")
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        peak = observations_df['consumption_kW'].max() if 'consumption_kW' in observations_df else 0
+        peak = current_observations['consumption_kW'].max() if not current_observations.empty else 0
         st.metric("Peak Demand", f"{peak:.1f} kW")
     
     with col2:
-        avg = observations_df['consumption_kW'].mean() if 'consumption_kW' in observations_df else 0
+        avg = current_observations['consumption_kW'].mean() if not current_observations.empty else 0
         st.metric("Average Demand", f"{avg:.1f} kW")
     
     with col3:
-        if not summary_df.empty and 'total_cost' in summary_df.columns:
-            cost = summary_df['total_cost'].iloc[-1]
-        elif 'consumption_kW' in observations_df and 'tariff' in observations_df:
-            cost = (observations_df['consumption_kW'] * observations_df['tariff']).sum()
+        if not current_summary.empty and 'total_cost' in current_summary.columns:
+            cost = current_summary['total_cost'].iloc[-1]
+        elif not current_observations.empty and 'tariff' in current_observations.columns:
+            cost = (current_observations['consumption_kW'] * current_observations['tariff']).sum()
         else:
             cost = 0
         st.metric("Total Cost", f"${cost:.2f}")
     
     with col4:
-        critical = len(observations_df[observations_df['status'] == 'CRITICAL']) if 'status' in observations_df else 0
+        critical = len(current_observations[current_observations['status'] == 'CRITICAL']) if 'status' in current_observations.columns else 0
         st.metric("Critical Alerts", critical)
     
     st.markdown("---")
@@ -160,12 +271,12 @@ def main():
     # Consumption Chart
     st.subheader("📈 Consumption Pattern")
     
-    if 'timestamp' in observations_df and 'consumption_kW' in observations_df:
+    if 'timestamp' in current_observations.columns and 'consumption_kW' in current_observations.columns:
         fig = go.Figure()
         
         fig.add_trace(go.Scatter(
-            x=observations_df['timestamp'],
-            y=observations_df['consumption_kW'],
+            x=current_observations['timestamp'],
+            y=current_observations['consumption_kW'],
             mode='lines+markers',
             name='Consumption',
             line=dict(color='#667eea', width=2),
@@ -173,8 +284,8 @@ def main():
         ))
         
         # Highlight critical points
-        if 'status' in observations_df:
-            critical_points = observations_df[observations_df['status'] == 'CRITICAL']
+        if 'status' in current_observations.columns:
+            critical_points = current_observations[current_observations['status'] == 'CRITICAL']
             if not critical_points.empty:
                 fig.add_trace(go.Scatter(
                     x=critical_points['timestamp'],
@@ -184,7 +295,13 @@ def main():
                     marker=dict(color='red', size=12, symbol='circle')
                 ))
         
-        fig.update_layout(height=500)
+        fig.update_layout(
+            title="Electricity Consumption Over Time",
+            xaxis_title="Time",
+            yaxis_title="Consumption (kW)",
+            height=500,
+            hovermode='x unified'
+        )
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Timestamp or consumption data not available")
@@ -196,16 +313,16 @@ def main():
     
     with col1:
         st.subheader("🚨 Anomalies")
-        if not anomalies_df.empty:
-            for _, row in anomalies_df.iterrows():
+        if not current_anomalies.empty:
+            for _, row in current_anomalies.iterrows():
                 st.warning(f"**{row.get('timestamp', 'Unknown')}**: {row.get('reason', 'No reason')}")
         else:
             st.success("✅ No anomalies detected")
     
     with col2:
         st.subheader("💡 Insights")
-        if not insights_df.empty and 'insights' in insights_df.columns:
-            insights_text = insights_df['insights'].iloc[-1]
+        if not current_insights.empty and 'insights' in current_insights.columns:
+            insights_text = current_insights['insights'].iloc[-1]
             if insights_text:
                 for insight in str(insights_text).split(' | ')[:3]:
                     if insight.strip():
@@ -217,8 +334,8 @@ def main():
     
     # Recommendations
     st.subheader("📋 Recommendations")
-    if not insights_df.empty and 'recommendations' in insights_df.columns:
-        recs = insights_df['recommendations'].iloc[-1]
+    if not current_insights.empty and 'recommendations' in current_insights.columns:
+        recs = current_insights['recommendations'].iloc[-1]
         if recs:
             for i, rec in enumerate(str(recs).split(' | '), 1):
                 if rec.strip():
@@ -227,7 +344,58 @@ def main():
         st.info("Run analysis to see recommendations")
     
     st.markdown("---")
-    st.caption("⚡ Energy Optimization Agent | Local Mode | Data from CSV files")
+    
+    # Selected Strategy
+    if not current_insights.empty:
+        if 'selected_strategy' in current_insights.columns:
+            strategy = current_insights['selected_strategy'].iloc[-1]
+            savings = current_insights['expected_savings'].iloc[-1] if 'expected_savings' in current_insights.columns else 0
+            if strategy and strategy != 'None':
+                st.subheader("🎯 Selected Optimization Strategy")
+                st.success(f"**{strategy}** - Expected Savings: ${savings}")
+    
+    # Historical Runs Summary (if multiple runs)
+    if len(available_runs) > 1 and 'run_number' in observations_df.columns:
+        st.markdown("---")
+        st.subheader("📊 Historical Performance Across Runs")
+        
+        # Aggregate by run
+        historical = observations_df.groupby('run_number').agg({
+            'consumption_kW': ['mean', 'max']
+        }).reset_index()
+        historical.columns = ['run_number', 'avg_consumption', 'peak_consumption']
+        
+        fig = go.Figure()
+        
+        fig.add_trace(go.Scatter(
+            x=historical['run_number'],
+            y=historical['peak_consumption'],
+            mode='lines+markers',
+            name='Peak Consumption',
+            line=dict(color='#ff6b6b', width=2),
+            marker=dict(size=8)
+        ))
+        
+        fig.add_trace(go.Scatter(
+            x=historical['run_number'],
+            y=historical['avg_consumption'],
+            mode='lines+markers',
+            name='Average Consumption',
+            line=dict(color='#667eea', width=2),
+            marker=dict(size=8)
+        ))
+        
+        fig.update_layout(
+            title="Peak vs Average Consumption Across Analysis Runs",
+            xaxis_title="Run Number",
+            yaxis_title="Consumption (kW)",
+            height=400
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    st.markdown("---")
+    st.caption("⚡ Energy Optimization Agent | Local Mode | JSON arrays in Column A | Each row = One workflow run")
 
 if __name__ == "__main__":
     main()
