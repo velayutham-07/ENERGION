@@ -1,16 +1,139 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
+import requests
 import os
 import json
-from datetime import datetime
 import time
+import threading
+from datetime import datetime
+import subprocess
 
 # ============================================
 # CONFIGURATION
 # ============================================
+WEBHOOK_URL = "https://api.agents.snsihub.ai/webhook/3849c989-1879-4f71-a86e-f1baedc2f6b4"
 LOCAL_DATA_DIR = 'local_data'
+
+# ============================================
+# PAGE CONFIGURATION
+# ============================================
+st.set_page_config(
+    page_title="ENERGION",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ============================================
+# CUSTOM CSS
+# ============================================
+st.markdown("""
+<style>
+    .stApp {
+        background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+    }
+    
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: 800;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        text-align: center;
+        margin-bottom: 0.5rem;
+    }
+    
+    .sub-header {
+        text-align: center;
+        color: #a0aec0;
+        margin-bottom: 2rem;
+    }
+    
+    .trigger-btn {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        padding: 0.8rem 2rem;
+        font-size: 1.2rem;
+        font-weight: 600;
+        border-radius: 50px;
+        cursor: pointer;
+        width: 100%;
+        transition: all 0.3s ease;
+    }
+    
+    .trigger-btn:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+    }
+    
+    .metric-card {
+        background: linear-gradient(135deg, rgba(102, 126, 234, 0.15) 0%, rgba(118, 75, 162, 0.15) 100%);
+        backdrop-filter: blur(10px);
+        border-radius: 20px;
+        padding: 1.2rem;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        transition: transform 0.3s ease;
+    }
+    
+    .metric-card:hover {
+        transform: translateY(-5px);
+    }
+    
+    .metric-label {
+        font-size: 0.85rem;
+        color: #a0aec0;
+        text-transform: uppercase;
+        letter-spacing: 2px;
+    }
+    
+    .metric-value {
+        font-size: 2rem;
+        font-weight: 700;
+        color: white;
+    }
+    
+    .alert-critical {
+        background: linear-gradient(135deg, rgba(255, 71, 71, 0.15) 0%, rgba(255, 107, 107, 0.1) 100%);
+        border-left: 4px solid #ff4747;
+        border-radius: 12px;
+        padding: 0.8rem;
+        margin: 0.5rem 0;
+    }
+    
+    .insight-card {
+        background: linear-gradient(135deg, rgba(72, 187, 120, 0.1) 0%, rgba(56, 161, 105, 0.05) 100%);
+        border-left: 4px solid #48bb78;
+        border-radius: 12px;
+        padding: 0.8rem;
+        margin: 0.5rem 0;
+    }
+    
+    .status-box {
+        background: rgba(0,0,0,0.5);
+        border-radius: 12px;
+        padding: 1rem;
+        text-align: center;
+        margin: 1rem 0;
+    }
+    
+    .custom-divider {
+        height: 1px;
+        background: linear-gradient(90deg, transparent, #667eea, #764ba2, transparent);
+        margin: 1.5rem 0;
+    }
+    
+    .badge {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border-radius: 20px;
+        padding: 0.25rem 0.75rem;
+        font-size: 0.7rem;
+        font-weight: 600;
+        display: inline-block;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # ============================================
 # HELPER FUNCTIONS
@@ -20,11 +143,9 @@ def parse_json_cell(cell_value):
     if not cell_value or pd.isna(cell_value):
         return []
     
-    # If it's already a list/dict
     if isinstance(cell_value, (list, dict)):
         return cell_value if isinstance(cell_value, list) else [cell_value]
     
-    # If it's a string, try to parse as JSON
     if isinstance(cell_value, str):
         try:
             parsed = json.loads(cell_value)
@@ -35,22 +156,16 @@ def parse_json_cell(cell_value):
     return []
 
 def load_csv_with_json_arrays(csv_path):
-    """
-    Load CSV where each row's first column contains a JSON array.
-    Returns a DataFrame with all parsed observations and run information.
-    """
+    """Load CSV where each row's first column contains a JSON array"""
     if not os.path.exists(csv_path):
         return pd.DataFrame(), []
     
-    # Read CSV without parsing JSON
     df_raw = pd.read_csv(csv_path)
     
     if df_raw.empty:
         return pd.DataFrame(), []
     
-    # Assume the JSON data is in the first column
     first_col = df_raw.columns[0]
-    
     all_parsed_data = []
     run_ids = []
     
@@ -59,12 +174,11 @@ def load_csv_with_json_arrays(csv_path):
         parsed = parse_json_cell(cell_value)
         
         if parsed:
-            run_id = idx + 2  # Row number (row 1 = header, row 2 = first run)
+            run_id = idx + 2
             for item in parsed:
                 if isinstance(item, dict):
                     item['run_id'] = run_id
                     item['run_number'] = idx + 1
-                    # Convert timestamp if exists
                     if 'timestamp' in item:
                         try:
                             item['timestamp'] = pd.to_datetime(item['timestamp'])
@@ -76,155 +190,183 @@ def load_csv_with_json_arrays(csv_path):
     return pd.DataFrame(all_parsed_data), run_ids
 
 def load_observations():
-    """Load observations from local CSV (JSON array format)"""
     csv_path = os.path.join(LOCAL_DATA_DIR, 'Observations.csv')
     return load_csv_with_json_arrays(csv_path)
 
 def load_summary():
-    """Load summary from local CSV (JSON array format)"""
     csv_path = os.path.join(LOCAL_DATA_DIR, 'Summary.csv')
     df, runs = load_csv_with_json_arrays(csv_path)
     return df, runs
 
 def load_anomalies():
-    """Load anomalies from local CSV (JSON array format)"""
     csv_path = os.path.join(LOCAL_DATA_DIR, 'Anomalies.csv')
     df, runs = load_csv_with_json_arrays(csv_path)
     return df, runs
 
 def load_insights():
-    """Load insights from local CSV (JSON array format)"""
     csv_path = os.path.join(LOCAL_DATA_DIR, 'Insights.csv')
     df, runs = load_csv_with_json_arrays(csv_path)
     return df, runs
 
+def trigger_workflow():
+    """Trigger the n8n workflow via webhook"""
+    try:
+        response = requests.post(
+            WEBHOOK_URL,
+            json={
+                "trigger": "manual",
+                "timestamp": datetime.now().isoformat(),
+                "source": "streamlit_dashboard"
+            },
+            timeout=30
+        )
+        return response.status_code == 200, response.status_code
+    except Exception as e:
+        return False, str(e)
+
 def get_last_sync_time():
-    """Get last sync time from file modification"""
     csv_path = os.path.join(LOCAL_DATA_DIR, 'Observations.csv')
     if os.path.exists(csv_path):
         mod_time = os.path.getmtime(csv_path)
         return datetime.fromtimestamp(mod_time)
     return None
 
-def get_run_summary(observations_df):
-    """Get summary of available runs"""
-    if observations_df.empty or 'run_number' not in observations_df.columns:
-        return []
-    
-    runs = observations_df.groupby('run_number').agg({
-        'timestamp': ['min', 'max', 'count'],
-        'consumption_kW': ['mean', 'max']
-    }).reset_index()
-    
-    runs.columns = ['run_number', 'start_time', 'end_time', 'num_obs', 'avg_kW', 'peak_kW']
-    
-    # Format time columns
-    if 'start_time' in runs.columns:
-        runs['start_time'] = pd.to_datetime(runs['start_time']).dt.strftime('%H:%M')
-        runs['end_time'] = pd.to_datetime(runs['end_time']).dt.strftime('%H:%M')
-    
-    return runs.to_dict('records')
-
 # ============================================
-# PAGE CONFIGURATION
+# SESSION STATE INITIALIZATION
 # ============================================
-st.set_page_config(
-    page_title="Energy Dashboard (Local)",
-    page_icon="⚡",
-    layout="wide"
-)
+if 'analysis_running' not in st.session_state:
+    st.session_state.analysis_running = False
+if 'analysis_complete' not in st.session_state:
+    st.session_state.analysis_complete = False
+if 'last_trigger_time' not in st.session_state:
+    st.session_state.last_trigger_time = None
+if 'auto_refresh' not in st.session_state:
+    st.session_state.auto_refresh = False
 
 # ============================================
 # MAIN DASHBOARD
 # ============================================
 def main():
-    st.title("⚡ Energy Optimization Dashboard")
-    st.markdown("**Local Mode** - Reading from CSV files with JSON arrays in Column A")
-    
-    # Show last sync time
-    last_sync = get_last_sync_time()
-    if last_sync:
-        st.caption(f"Data synced: {last_sync.strftime('%Y-%m-%d %H:%M:%S')}")
+    # Header
+    st.markdown('<div class="main-header">⚡ ENERGY OPTIMIZATION AI</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Intelligent energy management with real-time AI analysis</div>', unsafe_allow_html=True)
     
     # Sidebar
     with st.sidebar:
-        st.image("https://img.icons8.com/fluency/96/energy.png", width=80)
-        st.markdown("## ⚡ Energy Dashboard")
+        st.markdown("### 🎛️ CONTROL PANEL")
         st.markdown("---")
         
-        auto_refresh = st.checkbox("Auto-refresh (30 sec)", value=False)
+        # Big Trigger Button
+        st.markdown("#### 🚀 START ANALYSIS")
         
-        if st.button("🔄 Refresh Data"):
+        # Disable button while analysis is running
+        trigger_disabled = st.session_state.analysis_running
+        
+        if st.button("⚡ RUN ENERGY ANALYSIS", use_container_width=True, disabled=trigger_disabled):
+            with st.spinner("🔄 Triggering workflow..."):
+                success, result = trigger_workflow()
+                
+                if success:
+                    st.session_state.analysis_running = True
+                    st.session_state.analysis_complete = False
+                    st.session_state.last_trigger_time = datetime.now()
+                    st.success("✅ Analysis started! Waiting for results...")
+                    st.rerun()
+                else:
+                    st.error(f"❌ Failed: {result}")
+        
+        # Show status if analysis is running
+        if st.session_state.analysis_running:
+            st.markdown("""
+            <div class="status-box">
+                ⏳ <strong>Analysis in progress...</strong><br>
+                This takes about 30-45 seconds.<br>
+                Results will appear automatically.
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        # Auto-refresh toggle
+        st.session_state.auto_refresh = st.toggle("🔄 Auto-refresh", value=st.session_state.auto_refresh)
+        
+        if st.button("⟳ Refresh Data", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
         
         st.markdown("---")
-        st.markdown("### Data Source")
-        st.info(f"📁 Local CSV files\n`{LOCAL_DATA_DIR}/`")
+        st.markdown("### 📁 DATA SOURCE")
+        st.info(f"📂 `{LOCAL_DATA_DIR}/`")
         
-        # Show file status
-        files = ['Observations.csv', 'Summary.csv', 'Anomalies.csv', 'Insights.csv']
-        for f in files:
-            path = os.path.join(LOCAL_DATA_DIR, f)
-            if os.path.exists(path):
-                size = os.path.getsize(path)
-                st.markdown(f"✅ {f} ({size:,} bytes)")
-            else:
-                st.markdown(f"❌ {f} - Not found")
+        # Show last trigger time
+        if st.session_state.last_trigger_time:
+            st.markdown(f"🕐 Last trigger: {st.session_state.last_trigger_time.strftime('%H:%M:%S')}")
         
         st.markdown("---")
-        st.markdown(f"**Last Updated:** {datetime.now().strftime('%H:%M:%S')}")
+        st.markdown("### ℹ️ SYSTEM STATUS")
+        st.markdown("🟢 **Workflow:** Online")
+        st.markdown("🟢 **LLM Model:** Gemini 2.5 Flash-Lite")
+        st.markdown("🟢 **Dashboard:** Active")
     
-    # Auto-refresh
-    if auto_refresh:
+    # Auto-refresh logic
+    if st.session_state.auto_refresh:
         time.sleep(30)
         st.rerun()
     
-    # Load data
-    with st.spinner("Loading local data..."):
+    # Load and display data
+    with st.spinner("📊 Loading energy intelligence data..."):
         observations_df, obs_runs = load_observations()
         summary_df, sum_runs = load_summary()
         anomalies_df, anom_runs = load_anomalies()
         insights_df, ins_runs = load_insights()
     
-    # Check if we have data
+    # Check if new data arrived (if analysis was running)
+    if st.session_state.analysis_running and not observations_df.empty:
+        # Check if there's a new run
+        if 'run_number' in observations_df.columns:
+            latest_run = observations_df['run_number'].max()
+            if st.session_state.get('last_run', 0) != latest_run:
+                st.session_state.analysis_running = False
+                st.session_state.analysis_complete = True
+                st.session_state.last_run = latest_run
+                st.success("✅ Analysis complete! New results available.")
+                st.balloons()
+                st.rerun()
+    
     if observations_df.empty:
-        st.warning("⚠️ No local data found. Run sync script first:")
-        st.code("python sync_google_sheets_local.py", language="bash")
-        st.info("""
-        **Expected CSV Format:**
-        - Each CSV has one column with JSON arrays
-        - Row 1: Header
-        - Row 2, 3, 4...: Each cell contains a JSON array of observations
-        """)
+        st.info("📭 No data available. Click 'RUN ENERGY ANALYSIS' to start your first analysis.")
+        
+        # Show instructions
+        with st.expander("📖 How it works"):
+            st.markdown("""
+            1. Click the **RUN ENERGY ANALYSIS** button
+            2. Workflow fetches data from Google Sheets
+            3. AI analyzes consumption patterns
+            4. Results appear here automatically
+            """)
         return
     
     # Get available runs
     available_runs = sorted(observations_df['run_number'].unique()) if 'run_number' in observations_df else []
     
-    # Run selector in sidebar
-    with st.sidebar:
-        st.markdown("---")
-        st.markdown("### Select Run")
-        
-        if available_runs:
-            selected_run = st.selectbox(
-                "Analysis Run",
-                options=available_runs,
-                index=len(available_runs) - 1,
-                format_func=lambda x: f"Run {x}"
-            )
-        else:
-            selected_run = None
+    # Run selector
+    if available_runs:
+        selected_run = st.selectbox(
+            "📊 Select Analysis Run",
+            options=available_runs,
+            index=len(available_runs) - 1,
+            format_func=lambda x: f"🏃 Run {x} ({len(observations_df[observations_df['run_number'] == x])} observations)"
+        )
+    else:
+        selected_run = None
     
-    # Filter by selected run
+    # Filter data by selected run
     if selected_run and 'run_number' in observations_df.columns:
         current_observations = observations_df[observations_df['run_number'] == selected_run]
         current_anomalies = anomalies_df[anomalies_df['run_number'] == selected_run] if 'run_number' in anomalies_df else pd.DataFrame()
         current_insights = insights_df[insights_df['run_number'] == selected_run] if 'run_number' in insights_df else pd.DataFrame()
         current_summary = summary_df[summary_df['run_number'] == selected_run] if 'run_number' in summary_df else pd.DataFrame()
     else:
-        # Use latest run
         if 'run_number' in observations_df.columns:
             latest_run = observations_df['run_number'].max()
             current_observations = observations_df[observations_df['run_number'] == latest_run]
@@ -237,39 +379,60 @@ def main():
             current_insights = insights_df
             current_summary = summary_df
     
-    # Display run info
+    # Show run badge
     if available_runs:
-        st.info(f"📊 Showing **Run {selected_run if selected_run else latest_run}** | Total runs available: {len(available_runs)}")
+        st.markdown(f"<span class='badge'>📊 RUN {selected_run if selected_run else latest_run}</span>", unsafe_allow_html=True)
     
-    # Display metrics
-    st.subheader("📊 Key Metrics")
+    st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
+    
+    # Key Metrics
+    st.markdown("### 📈 KEY PERFORMANCE INDICATORS")
+    
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         peak = current_observations['consumption_kW'].max() if not current_observations.empty else 0
-        st.metric("Peak Demand", f"{peak:.1f} kW")
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">⚡ PEAK DEMAND</div>
+            <div class="metric-value">{peak:.1f}<span style="font-size:1rem;"> kW</span></div>
+        </div>
+        """, unsafe_allow_html=True)
     
     with col2:
         avg = current_observations['consumption_kW'].mean() if not current_observations.empty else 0
-        st.metric("Average Demand", f"{avg:.1f} kW")
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">📊 AVERAGE DEMAND</div>
+            <div class="metric-value">{avg:.1f}<span style="font-size:1rem;"> kW</span></div>
+        </div>
+        """, unsafe_allow_html=True)
     
     with col3:
         if not current_summary.empty and 'total_cost' in current_summary.columns:
             cost = current_summary['total_cost'].iloc[-1]
-        elif not current_observations.empty and 'tariff' in current_observations.columns:
-            cost = (current_observations['consumption_kW'] * current_observations['tariff']).sum()
         else:
-            cost = 0
-        st.metric("Total Cost", f"${cost:.2f}")
+            cost = (current_observations['consumption_kW'] * current_observations['tariff']).sum() if not current_observations.empty else 0
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">💰 TOTAL COST</div>
+            <div class="metric-value">${cost:.2f}</div>
+        </div>
+        """, unsafe_allow_html=True)
     
     with col4:
         critical = len(current_observations[current_observations['status'] == 'CRITICAL']) if 'status' in current_observations.columns else 0
-        st.metric("Critical Alerts", critical)
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">⚠️ CRITICAL ALERTS</div>
+            <div class="metric-value">{critical}</div>
+        </div>
+        """, unsafe_allow_html=True)
     
-    st.markdown("---")
+    st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
     
     # Consumption Chart
-    st.subheader("📈 Consumption Pattern")
+    st.markdown("### 📉 CONSUMPTION PATTERN")
     
     if 'timestamp' in current_observations.columns and 'consumption_kW' in current_observations.columns:
         fig = go.Figure()
@@ -279,11 +442,10 @@ def main():
             y=current_observations['consumption_kW'],
             mode='lines+markers',
             name='Consumption',
-            line=dict(color='#667eea', width=2),
-            marker=dict(size=6)
+            line=dict(color='#667eea', width=3),
+            marker=dict(size=8, color='#764ba2')
         ))
         
-        # Highlight critical points
         if 'status' in current_observations.columns:
             critical_points = current_observations[current_observations['status'] == 'CRITICAL']
             if not critical_points.empty:
@@ -291,111 +453,87 @@ def main():
                     x=critical_points['timestamp'],
                     y=critical_points['consumption_kW'],
                     mode='markers',
-                    name='Critical Alerts',
-                    marker=dict(color='red', size=12, symbol='circle')
+                    name='⚠️ Critical Alerts',
+                    marker=dict(color='#ff4747', size=14, symbol='x')
                 ))
         
         fig.update_layout(
-            title="Electricity Consumption Over Time",
-            xaxis_title="Time",
-            yaxis_title="Consumption (kW)",
-            height=500,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='white'),
+            xaxis=dict(gridcolor='rgba(255,255,255,0.1)'),
+            yaxis=dict(gridcolor='rgba(255,255,255,0.1)'),
+            height=450,
             hovermode='x unified'
         )
+        
         st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Timestamp or consumption data not available")
     
-    st.markdown("---")
+    st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
     
     # Anomalies and Insights
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("🚨 Anomalies")
+        st.markdown("### 🚨 ANOMALY DETECTION")
         if not current_anomalies.empty:
             for _, row in current_anomalies.iterrows():
-                st.warning(f"**{row.get('timestamp', 'Unknown')}**: {row.get('reason', 'No reason')}")
+                st.markdown(f"""
+                <div class="alert-critical">
+                    <strong>⚠️ {row.get('type', 'Anomaly').upper()}</strong><br>
+                    📍 {row.get('timestamp', 'Unknown')}<br>
+                    💡 {row.get('reason', 'No reason')}
+                </div>
+                """, unsafe_allow_html=True)
         else:
-            st.success("✅ No anomalies detected")
+            st.markdown('<div class="insight-card">✅ No anomalies detected</div>', unsafe_allow_html=True)
     
     with col2:
-        st.subheader("💡 Insights")
+        st.markdown("### 💡 KEY INSIGHTS")
         if not current_insights.empty and 'insights' in current_insights.columns:
             insights_text = current_insights['insights'].iloc[-1]
             if insights_text:
                 for insight in str(insights_text).split(' | ')[:3]:
                     if insight.strip():
-                        st.info(insight.strip())
+                        st.markdown(f'<div class="insight-card">💡 {insight.strip()}</div>', unsafe_allow_html=True)
         else:
-            st.info("Run analysis to see insights")
+            st.markdown('<div class="insight-card">🔮 Run analysis to see AI insights</div>', unsafe_allow_html=True)
     
-    st.markdown("---")
+    st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
     
     # Recommendations
-    st.subheader("📋 Recommendations")
+    st.markdown("### 📋 AI-GENERATED RECOMMENDATIONS")
+    
     if not current_insights.empty and 'recommendations' in current_insights.columns:
         recs = current_insights['recommendations'].iloc[-1]
         if recs:
             for i, rec in enumerate(str(recs).split(' | '), 1):
                 if rec.strip():
-                    st.write(f"{i}. {rec.strip()}")
-    else:
-        st.info("Run analysis to see recommendations")
+                    st.markdown(f'<div class="insight-card">{i}. {rec.strip()}</div>', unsafe_allow_html=True)
     
-    st.markdown("---")
+    st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
     
     # Selected Strategy
-    if not current_insights.empty:
-        if 'selected_strategy' in current_insights.columns:
-            strategy = current_insights['selected_strategy'].iloc[-1]
-            savings = current_insights['expected_savings'].iloc[-1] if 'expected_savings' in current_insights.columns else 0
-            if strategy and strategy != 'None':
-                st.subheader("🎯 Selected Optimization Strategy")
-                st.success(f"**{strategy}** - Expected Savings: ${savings}")
+    if not current_insights.empty and 'selected_strategy' in current_insights.columns:
+        strategy = current_insights['selected_strategy'].iloc[-1]
+        savings = current_insights['expected_savings'].iloc[-1] if 'expected_savings' in current_insights.columns else 0
+        if strategy and strategy != 'None' and savings > 0:
+            st.markdown(f"""
+            <div class="metric-card" style="text-align: center;">
+                <div class="metric-label">🎯 RECOMMENDED STRATEGY</div>
+                <div class="metric-value">{strategy}</div>
+                <div class="metric-label">Expected Savings: ${savings}</div>
+            </div>
+            """, unsafe_allow_html=True)
     
-    # Historical Runs Summary (if multiple runs)
-    if len(available_runs) > 1 and 'run_number' in observations_df.columns:
-        st.markdown("---")
-        st.subheader("📊 Historical Performance Across Runs")
-        
-        # Aggregate by run
-        historical = observations_df.groupby('run_number').agg({
-            'consumption_kW': ['mean', 'max']
-        }).reset_index()
-        historical.columns = ['run_number', 'avg_consumption', 'peak_consumption']
-        
-        fig = go.Figure()
-        
-        fig.add_trace(go.Scatter(
-            x=historical['run_number'],
-            y=historical['peak_consumption'],
-            mode='lines+markers',
-            name='Peak Consumption',
-            line=dict(color='#ff6b6b', width=2),
-            marker=dict(size=8)
-        ))
-        
-        fig.add_trace(go.Scatter(
-            x=historical['run_number'],
-            y=historical['avg_consumption'],
-            mode='lines+markers',
-            name='Average Consumption',
-            line=dict(color='#667eea', width=2),
-            marker=dict(size=8)
-        ))
-        
-        fig.update_layout(
-            title="Peak vs Average Consumption Across Analysis Runs",
-            xaxis_title="Run Number",
-            yaxis_title="Consumption (kW)",
-            height=400
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-    
-    st.markdown("---")
-    st.caption("⚡ Energy Optimization Agent | Local Mode | JSON arrays in Column A | Each row = One workflow run")
+    # Footer
+    st.markdown("""
+    <div style="text-align: center; padding: 2rem 0 1rem 0;">
+        <p style="color: #a0aec0; font-size: 0.8rem;">
+            ⚡ ENERGION | Powered by Gemini 2.5 Flash-Lite
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
