@@ -248,7 +248,7 @@ if 'auto_refresh' not in st.session_state:
 # ============================================
 def main():
     # Header
-    st.markdown('<div class="main-header">⚡ ENERGY OPTIMIZATION AI</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">⚡ ENERGION</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">Intelligent energy management with real-time AI analysis</div>', unsafe_allow_html=True)
     
     # Sidebar
